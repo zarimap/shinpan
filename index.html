@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="ja" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Referee - Gemini Real-time Vision System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkbg: '#0f172a',
+                        cardbg: '#1e293b',
+                        accent: '#3b82f6',
+                        violation: '#ef4444',
+                        trigger: '#10b981'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom scrollbar & canvas overlay styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 3px;
+        }
+        .canvas-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .pulse-violation {
+            animation: pulse-red 1s infinite alternate;
+        }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            100% { box-shadow: 0 0 20px 10px rgba(239, 68, 68, 0.2); }
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen flex flex-col antialiased selection:bg-blue-500 selection:text-white">
+
+    <!-- Header -->
+    <header class="bg-slate-950 border-b border-slate-800 px-6 py-4 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/30">
+                <i class="fa-solid font-bold fa-scale-balanced text-white text-xl"></i>
+            </div>
+            <div>
+                <h1 class="text-xl font-bold tracking-wide bg-gradient-to-r from-white via-slate-200 to-blue-400 bg-clip-text text-transparent">
+                    AI VAR Referee System
+                </h1>
+                <p class="text-xs text-slate-400">Gemini 2.5 Flash Vision VAR Monitor</p>
+            </div>
+        </div>
+
+        <!-- Status Badge & Controls -->
+        <div class="flex items-center gap-4">
+            <div id="statusBadge" class="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-300">
+                <span class="w-2.5 h-2.5 rounded-full bg-slate-500" id="statusDot"></span>
+                <span id="statusText">システム停止中</span>
+            </div>
+
+            <button id="apiKeyBtn" class="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 transition">
+                <i class="fa-solid fa-key text-yellow-400"></i>
+                <span id="apiKeyStatusText">APIキー設定</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Dashboard Grid -->
+    <main class="flex-1 p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-[1800px] w-full mx-auto">
+
+        <!-- Left / Top Column: Camera Feed & Video Overlay (7 cols on LG) -->
+        <section class="lg:col-span-7 xl:col-span-8 flex flex-col gap-4">
+            
+            <!-- Video Stage Container -->
+            <div class="relative bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl flex flex-col justify-center items-center aspect-video min-h-[360px]">
+                
+                <!-- Camera Video Stream -->
+                <video id="webcam" autoplay playsinline muted class="w-full h-full object-contain hidden"></video>
+                
+                <!-- Bounding Box Canvas Overlay -->
+                <canvas id="overlayCanvas" class="canvas-overlay hidden"></canvas>
+
+                <!-- Offscreen capture canvas -->
+                <canvas id="captureCanvas" class="hidden"></canvas>
+
+                <!-- Placeholder when camera is off -->
+                <div id="cameraPlaceholder" class="flex flex-col items-center justify-center text-slate-500 p-8 text-center">
+                    <div class="w-20 h-20 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mb-4 text-3xl text-slate-600">
+                        <i class="fa-solid fa-video-slash"></i>
+                    </div>
+                    <p class="text-base font-semibold text-slate-300 mb-1">カメラが停止しています</p>
+                    <p class="text-xs text-slate-500 max-w-xs">「カメラ開始」ボタンを押して試合監視とAI審判を開始してください。</p>
+                </div>
+
+                <!-- Overlay Processing Banner -->
+                <div id="analyzingBanner" class="absolute top-4 left-4 bg-slate-900/90 backdrop-blur border border-blue-500/40 text-blue-400 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 hidden shadow-lg">
+                    <i class="fa-solid fa-spinner animate-spin"></i>
+                    <span>AI解析中...</span>
+                </div>
+
+                <!-- Live Rule Breach Alert Bar -->
+                <div id="alertBanner" class="absolute bottom-4 left-4 right-4 bg-red-600/90 backdrop-blur text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center justify-between hidden shadow-xl animate-bounce">
+                    <div class="flex items-center gap-3">
+                        <i class="fa-solid fa-triangle-exclamation text-xl"></i>
+                        <span id="alertMessage">違反を検出しました！</span>
+                    </div>
+                    <span class="text-xs font-mono bg-red-950/60 px-2.5 py-1 rounded-md">VAR CHECK</span>
+                </div>
+            </div>
+
+            <!-- Camera Controls Bar -->
+            <div class="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <button id="startCamBtn" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold text-sm flex items-center gap-2 shadow-lg shadow-blue-600/30 transition active:scale-95">
+                        <i class="fa-solid fa-camera"></i>
+                        カメラ開始
+                    </button>
+                    <button id="stopCamBtn" disabled class="px-5 py-2.5 bg-slate-800 text-slate-500 cursor-not-allowed rounded-lg font-semibold text-sm flex items-center gap-2 transition border border-slate-700">
+                        <i class="fa-solid fa-stop"></i>
+                        停止
+                    </button>
+                    <button id="manualTriggerBtn" disabled class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-semibold text-sm flex items-center gap-2 shadow-md transition active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <i class="fa-solid fa-bolt"></i>
+                        手動チェック
+                    </button>
+                </div>
+
+                <!-- Auto Loop Controls -->
+                <div class="flex items-center gap-3 text-xs text-slate-300">
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
+                        <input type="checkbox" id="autoCheckToggle" checked class="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 bg-slate-800 border-slate-700">
+                        <span>自動審判ループ</span>
+                    </label>
+                    <div class="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5">
+                        <i class="fa-solid fa-clock text-slate-400"></i>
+                        <select id="intervalSelect" class="bg-transparent text-slate-200 outline-none text-xs font-medium cursor-pointer">
+                            <option value="2000">2 秒毎</option>
+                            <option value="3000" selected>3 秒毎</option>
+                            <option value="5000">5 秒毎</option>
+                            <option value="10000">10 秒毎</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Rule Legend -->
+            <div class="grid grid-cols-2 gap-4">
+                <div class="bg-red-950/20 border border-red-500/30 rounded-xl p-3.5 flex items-center gap-3">
+                    <div class="w-4 h-4 rounded bg-red-500 flex-shrink-0 border-2 border-white/20"></div>
+                    <div class="text-xs">
+                        <span class="font-bold text-red-400 block">RED BOX - ルール違反 (Violation)</span>
+                        <span class="text-slate-400">頭・顔に手を触れる / 反則姿勢など</span>
+                    </div>
+                </div>
+                <div class="bg-emerald-950/20 border border-emerald-500/30 rounded-xl p-3.5 flex items-center gap-3">
+                    <div class="w-4 h-4 rounded bg-emerald-500 flex-shrink-0 border-2 border-white/20"></div>
+                    <div class="text-xs">
+                        <span class="font-bold text-emerald-400 block">GREEN BOX - イベント (Trigger)</span>
+                        <span class="text-slate-400">手を挙げる / 正しい合図・アピールなど</span>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- Right Column: Rules Configuration & Decision Logs (5 cols on LG) -->
+        <section class="lg:col-span-5 xl:col-span-4 flex flex-col gap-6">
+            
+            <!-- Rules Configuration Panel -->
+            <div class="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col gap-4">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-gavel text-amber-400"></i>
+                        <h2 class="font-bold text-sm text-slate-200">審判ルール定義設定</h2>
+                    </div>
+                    <button id="resetRulesBtn" class="text-xs text-slate-400 hover:text-slate-200 underline">初期値に戻す</button>
+                </div>
+
+                <!-- Rule 1: Violation (Red) -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-xs font-semibold text-red-400 flex items-center justify-between">
+                        <span><i class="fa-solid fa-ban mr-1"></i> 違反ルール (Red Box)</span>
+                        <span class="text-[10px] bg-red-950 text-red-300 px-1.5 py-0.5 rounded border border-red-800">Violation</span>
+                    </label>
+                    <textarea id="ruleViolationInput" rows="2" class="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-red-500 resize-none" placeholder="例: 手で顔や頭に触れている、立ち上がる"></textarea>
+                </div>
+
+                <!-- Rule 2: Trigger / Achievement (Green) -->
+                <div class="flex flex-col gap-1.5">
+                    <label class="text-xs font-semibold text-emerald-400 flex items-center justify-between">
+                        <span><i class="fa-solid fa-circle-check mr-1"></i> トリガー/アピールルール (Green Box)</span>
+                        <span class="text-[10px] bg-emerald-950 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-800">Trigger</span>
+                    </label>
+                    <textarea id="ruleTriggerInput" rows="2" class="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 resize-none" placeholder="例: 片手または両手を高く挙げている"></textarea>
+                </div>
+            </div>
+
+            <!-- Real-time Decision Log -->
+            <div class="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl flex-1 flex flex-col min-h-[350px]">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-list-check text-blue-400"></i>
+                        <h2 class="font-bold text-sm text-slate-200">審判判定ログ (Decision Log)</h2>
+                    </div>
+                    <button id="clearLogsBtn" class="text-xs text-slate-400 hover:text-slate-200">
+                        <i class="fa-solid fa-trash-can mr-1"></i>クリア
+                    </button>
+                </div>
+
+                <!-- Log Container -->
+                <div id="decisionLogList" class="flex-1 overflow-y-auto space-y-2.5 pr-1 max-h-[420px]">
+                    <div id="emptyLogMsg" class="text-center text-slate-500 py-12 text-xs">
+                        判定ログはありません。<br>カメラを開始するとリアルタイムで判定結果が表示されます。
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- Modal: API Key Config -->
+    <div id="apiKeyModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full shadow-2xl relative">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-key text-yellow-400 text-lg"></i>
+                    <h3 class="font-bold text-base text-slate-100">Gemini APIキー設定</h3>
+                </div>
+                <button id="closeModalBtn" class="text-slate-400 hover:text-white text-lg px-2">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <p class="text-xs text-slate-400 mb-4 leading-relaxed">
+                本アプリは画像認識に <strong>Gemini 2.5 Flash API</strong> を使用します。Google AI Studio から取得したAPIキーを入力してください。（キーはブラウザのLocalStorageに安全に保存されます）
+            </p>
+
+            <div class="flex flex-col gap-2 mb-6">
+                <label class="text-xs font-semibold text-slate-300">Gemini API Key</label>
+                <input type="password" id="apiKeyInput" placeholder="AIzaSy..." class="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-100 focus:outline-none focus:border-blue-500">
+            </div>
+
+            <div class="flex items-center justify-end gap-3">
+                <button id="saveApiKeyBtn" class="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg shadow-lg shadow-blue-600/30 transition">
+                    保存して適用
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Default System Rules
+        const DEFAULT_RULES = {
+            violation: "手で顔や頭に触れている（Touching face or head with hands）",
+            trigger: "片手または両手を上に高く挙げている（Raising hand/arm up）"
+        };
+
+        // State Variables
+        let apiKey = localStorage.getItem("gemini_api_key") || "";
+        let stream = null;
+        let isProcessing = false;
+        let autoCheckInterval = null;
+
+        // DOM Elements
+        const webcam = document.getElementById("webcam");
+        const overlayCanvas = document.getElementById("overlayCanvas");
+        const captureCanvas = document.getElementById("captureCanvas");
+        const ctx = overlayCanvas.getContext("2d");
+        const cameraPlaceholder = document.getElementById("cameraPlaceholder");
+        
+        const startCamBtn = document.getElementById("startCamBtn");
+        const stopCamBtn = document.getElementById("stopCamBtn");
+        const manualTriggerBtn = document.getElementById("manualTriggerBtn");
+        const autoCheckToggle = document.getElementById("autoCheckToggle");
+        const intervalSelect = document.getElementById("intervalSelect");
+
+        const statusBadge = document.getElementById("statusBadge");
+        const statusDot = document.getElementById("statusDot");
+        const statusText = document.getElementById("statusText");
+        const analyzingBanner = document.getElementById("analyzingBanner");
+        const alertBanner = document.getElementById("alertBanner");
+        const alertMessage = document.getElementById("alertMessage");
+
+        const apiKeyBtn = document.getElementById("apiKeyBtn");
+        const apiKeyStatusText = document.getElementById("apiKeyStatusText");
+        const apiKeyModal = document.getElementById("apiKeyModal");
+        const closeModalBtn = document.getElementById("closeModalBtn");
+        const apiKeyInput = document.getElementById("apiKeyInput");
+        const saveApiKeyBtn = document.getElementById("saveApiKeyBtn");
+
+        const ruleViolationInput = document.getElementById("ruleViolationInput");
+        const ruleTriggerInput = document.getElementById("ruleTriggerInput");
+        const resetRulesBtn = document.getElementById("resetRulesBtn");
+
+        const decisionLogList = document.getElementById("decisionLogList");
+        const emptyLogMsg = document.getElementById("emptyLogMsg");
+        const clearLogsBtn = document.getElementById("clearLogsBtn");
+
+        // Web Audio API Whistle Sound Generator for Violations
+        function playWhistleSound() {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContext) return;
+                const audioCtx = new AudioContext();
+                
+                // Double Tone Whistle Effect
+                const osc1 = audioCtx.createOscillator();
+                const osc2 = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                osc1.type = 'sine';
+                osc2.type = 'triangle';
+
+                osc1.frequency.setValueAtTime(2800, audioCtx.currentTime);
+                osc2.frequency.setValueAtTime(2850, audioCtx.currentTime);
+
+                // Quick frequency modulation for whistle trill
+                osc1.frequency.exponentialRampToValueAtTime(3200, audioCtx.currentTime + 0.08);
+                osc2.frequency.exponentialRampToValueAtTime(3250, audioCtx.currentTime + 0.08);
+
+                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
+
+                osc1.connect(gain);
+                osc2.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc1.start();
+                osc2.start();
+                osc1.stop(audioCtx.currentTime + 0.35);
+                osc2.stop(audioCtx.currentTime + 0.35);
+            } catch (e) {
+                console.error("Audio error:", e);
+            }
+        }
+
+        function playTriggerSound() {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContext) return;
+                const audioCtx = new AudioContext();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.15);
+            } catch (e) {
+                console.error("Audio error:", e);
+            }
+        }
+
+        function updateApiKeyUI() {
+            if (apiKey) {
+                apiKeyStatusText.textContent = "APIキー登録済";
+                apiKeyStatusText.classList.add("text-emerald-400");
+            } else {
+                apiKeyStatusText.textContent = "APIキー未設定";
+                apiKeyStatusText.classList.remove("text-emerald-400");
+            }
+        }
+
+        apiKeyBtn.addEventListener("click", () => {
+            apiKeyInput.value = apiKey;
+            apiKeyModal.classList.remove("hidden");
+        });
+
+        closeModalBtn.addEventListener("click", () => {
+            apiKeyModal.classList.add("hidden");
+        });
+
+        saveApiKeyBtn.addEventListener("click", () => {
+            apiKey = apiKeyInput.value.trim();
+            localStorage.setItem("gemini_api_key", apiKey);
+            updateApiKeyUI();
+            apiKeyModal.classList.add("hidden");
+        });
+
+        // Initialize Rule Inputs
+        ruleViolationInput.value = DEFAULT_RULES.violation;
+        ruleTriggerInput.value = DEFAULT_RULES.trigger;
+
+        resetRulesBtn.addEventListener("click", () => {
+            ruleViolationInput.value = DEFAULT_RULES.violation;
+            ruleTriggerInput.value = DEFAULT_RULES.trigger;
+        });
+
+        async function startCamera() {
+            if (!apiKey) {
+                apiKeyModal.classList.remove("hidden");
+                alert("Gemini APIキーを設定してください。");
+                return;
+            }
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+                    audio: false
+                });
+
+                webcam.srcObject = stream;
+                await webcam.play();
+
+                webcam.classList.remove("hidden");
+                overlayCanvas.classList.remove("hidden");
+                cameraPlaceholder.classList.add("hidden");
+
+                startCamBtn.disabled = true;
+                startCamBtn.classList.add("opacity-50", "cursor-not-allowed");
+                stopCamBtn.disabled = false;
+                stopCamBtn.classList.remove("opacity-50", "cursor-not-allowed", "text-slate-500");
+                stopCamBtn.classList.add("hover:bg-slate-700", "text-slate-200");
+                manualTriggerBtn.disabled = false;
+
+                updateStatus("monitoring", "監視中 - All Clear");
+                resizeCanvas();
+                setupAutoLoop();
+
+            } catch (err) {
+                console.error("Camera start error:", err);
+                alert("カメラの起動に失敗しました。カメラのアクセス許可を確認してください。");
+            }
+        }
+
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+
+            if (autoCheckInterval) {
+                clearInterval(autoCheckInterval);
+                autoCheckInterval = null;
+            }
+
+            webcam.classList.add("hidden");
+            overlayCanvas.classList.add("hidden");
+            cameraPlaceholder.classList.remove("hidden");
+
+            startCamBtn.disabled = false;
+            startCamBtn.classList.remove("opacity-50", "cursor-not-allowed");
+            stopCamBtn.disabled = true;
+            stopCamBtn.classList.add("opacity-50", "cursor-not-allowed", "text-slate-500");
+            stopCamBtn.classList.remove("hover:bg-slate-700", "text-slate-200");
+            manualTriggerBtn.disabled = true;
+
+            clearCanvas();
+            updateStatus("off", "システム停止中");
+        }
+
+        function resizeCanvas() {
+            if (webcam.videoWidth && webcam.videoHeight) {
+                overlayCanvas.width = webcam.videoWidth;
+                overlayCanvas.height = webcam.videoHeight;
+            }
+        }
+
+        window.addEventListener("resize", resizeCanvas);
+        webcam.addEventListener("loadedmetadata", resizeCanvas);
+
+        startCamBtn.addEventListener("click", startCamera);
+        stopCamBtn.addEventListener("click", stopCamera);
+        manualTriggerBtn.addEventListener("click", () => performRefereeAnalysis());
+
+        function updateStatus(state, message) {
+            statusText.textContent = message;
+            statusDot.className = "w-2.5 h-2.5 rounded-full";
+
+            if (state === "monitoring") {
+                statusDot.classList.add("bg-emerald-500", "animate-pulse");
+                statusBadge.className = "flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-950/40 border border-emerald-500/30 text-xs font-semibold text-emerald-300";
+            } else if (state === "analyzing") {
+                statusDot.classList.add("bg-blue-500", "animate-ping");
+                statusBadge.className = "flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-blue-950/40 border border-blue-500/30 text-xs font-semibold text-blue-300";
+            } else if (state === "violation") {
+                statusDot.classList.add("bg-red-500", "animate-bounce");
+                statusBadge.className = "flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-red-950/40 border border-red-500/30 text-xs font-semibold text-red-300";
+            } else {
+                statusDot.classList.add("bg-slate-500");
+                statusBadge.className = "flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-300";
+            }
+        }
+
+        function setupAutoLoop() {
+            if (autoCheckInterval) clearInterval(autoCheckInterval);
+            if (autoCheckToggle.checked && stream) {
+                const ms = parseInt(intervalSelect.value, 10) || 3000;
+                autoCheckInterval = setInterval(() => {
+                    if (!isProcessing) {
+                        performRefereeAnalysis();
+                    }
+                }, ms);
+            }
+        }
+
+        autoCheckToggle.addEventListener("change", setupAutoLoop);
+        intervalSelect.addEventListener("change", setupAutoLoop);
+
+        async function performRefereeAnalysis() {
+            if (!stream || isProcessing || !apiKey) return;
+
+            isProcessing = true;
+            analyzingBanner.classList.remove("hidden");
+            updateStatus("analyzing", "VAR AI解析中...");
+
+            // Capture Frame
+            captureCanvas.width = webcam.videoWidth || 640;
+            captureCanvas.height = webcam.videoHeight || 480;
+            const capCtx = captureCanvas.getContext("2d");
+            capCtx.drawImage(webcam, 0, 0, captureCanvas.width, captureCanvas.height);
+
+            const base64Image = captureCanvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+
+            // Build Referee Rules Prompt
+            const violationRule = ruleViolationInput.value.trim() || DEFAULT_RULES.violation;
+            const triggerRule = ruleTriggerInput.value.trim() || DEFAULT_RULES.trigger;
+
+            const systemPrompt = `You are an strict official sports VAR referee. 
+Analyze the image feed for people/faces and evaluate them against these rules:
+1. VIOLATION RULE (違反ルール): ${violationRule}
+2. TRIGGER / EVENT RULE (トリガー/達成ルール): ${triggerRule}
+
+Analyze each visible person's face or body posture in the frame.
+Return ONLY a valid JSON array of detections with format:
+[
+  {
+    "status": "violation" | "trigger" | "normal",
+    "box_2d": [ymin, xmin, ymax, xmax],  // normalized coordinates 0 to 1000 integer values
+    "label": "Short label (e.g. Person 1)",
+    "reason": "Specific reason for the decision in Japanese"
+  }
+]
+Rules:
+- If a person breaks the VIOLATION RULE, set status="violation".
+- If a person triggers the TRIGGER RULE, set status="trigger".
+- If neither applies, set status="normal" or omit them if standard behavior.
+- Ensure box_2d surrounds the face or upper body clearly [ymin, xmin, ymax, xmax] in 0-1000 scale.
+- Reply ONLY with JSON array, no extra text, markdown formatting or commentary.`;
+
+            const payload = {
+                contents: [{
+                    parts: [
+                        { text: systemPrompt },
+                        { inlineData: { mimeType: "image/jpeg", data: base64Image } }
+                    ]
+                }],
+                generationConfig: {
+                    responseMimeType: "application/json"
+                }
+            };
+
+            try {
+                // Use standard fetch call for gemini-2.5-flash
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status}`);
+                }
+
+                const result = await response.json();
+                const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (jsonText) {
+                    const detections = JSON.parse(jsonText);
+                    processDetections(detections);
+                }
+
+            } catch (err) {
+                console.error("Referee Analysis Error:", err);
+            } finally {
+                isProcessing = false;
+                analyzingBanner.classList.add("hidden");
+            }
+        }
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+
+        function processDetections(detections) {
+            clearCanvas();
+            alertBanner.classList.add("hidden");
+
+            if (!Array.isArray(detections) || detections.length === 0) {
+                updateStatus("monitoring", "監視中 - 異常なし");
+                return;
+            }
+
+            let hasViolation = false;
+            let hasTrigger = false;
+
+            detections.forEach(item => {
+                if (!item.box_2d || item.status === "normal") return;
+
+                const [ymin, xmin, ymax, xmax] = item.box_2d;
+                
+                // Convert normalized 0-1000 coordinates to actual canvas dimensions
+                const x = (xmin / 1000) * overlayCanvas.width;
+                const y = (ymin / 1000) * overlayCanvas.height;
+                const width = ((xmax - xmin) / 1000) * overlayCanvas.width;
+                const height = ((ymax - ymin) / 1000) * overlayCanvas.height;
+
+                const isViolation = item.status === "violation";
+                const isTrigger = item.status === "trigger";
+
+                if (isViolation) hasViolation = true;
+                if (isTrigger) hasTrigger = true;
+
+                // Color Configuration
+                const strokeColor = isViolation ? "#ef4444" : (isTrigger ? "#10b981" : "#3b82f6");
+                const fillColor = isViolation ? "rgba(239, 68, 68, 0.15)" : "rgba(16, 185, 129, 0.15)";
+                const tagBg = isViolation ? "#ef4444" : "#10b981";
+                const titleText = isViolation ? "VIOLATION (違反)" : "TRIGGER (達成)";
+
+                // Draw Box
+                ctx.save();
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = strokeColor;
+                ctx.fillStyle = fillColor;
+
+                // Rounded Rect
+                ctx.beginPath();
+                ctx.roundRect(x, y, width, height, 8);
+                ctx.stroke();
+                ctx.fill();
+
+                // Draw Corner Accent Markers
+                const cornerLen = Math.min(width, height) * 0.25;
+                ctx.lineWidth = 6;
+                // Top-Left
+                ctx.beginPath();
+                ctx.moveTo(x, y + cornerLen);
+                ctx.lineTo(x, y);
+                ctx.lineTo(x + cornerLen, y);
+                ctx.stroke();
+
+                // Top-Right
+                ctx.beginPath();
+                ctx.moveTo(x + width - cornerLen, y);
+                ctx.lineTo(x + width, y);
+                ctx.lineTo(x + width, y + cornerLen);
+                ctx.stroke();
+
+                // Draw Header Label Tag
+                const padding = 6;
+                const fontSize = 13;
+                ctx.font = `bold ${fontSize}px sans-serif`;
+                const labelText = `${titleText}: ${item.reason || ''}`;
+                const textWidth = ctx.measureText(labelText).width;
+
+                ctx.fillStyle = tagBg;
+                ctx.fillRect(x, Math.max(0, y - 28), textWidth + (padding * 2), 26);
+
+                ctx.fillStyle = "#ffffff";
+                ctx.fillText(labelText, x + padding, Math.max(18, y - 10));
+
+                ctx.restore();
+
+                // Add to Log Panel
+                addDecisionLog(item);
+            });
+
+            // Handle Global Alerts & Audio
+            if (hasViolation) {
+                updateStatus("violation", "ルール違反検出 (VIOLATION)");
+                alertMessage.textContent = "ルール違反を検出しました！";
+                alertBanner.classList.remove("hidden");
+                playWhistleSound();
+            } else if (hasTrigger) {
+                updateStatus("monitoring", "ルールアピール/トリガー検知");
+                playTriggerSound();
+            } else {
+                updateStatus("monitoring", "監視中 - All Clear");
+            }
+        }
+
+        function addDecisionLog(item) {
+            emptyLogMsg.classList.add("hidden");
+
+            const isViolation = item.status === "violation";
+            const timeStr = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            const logEl = document.createElement("div");
+            logEl.className = `p-3 rounded-xl border flex flex-col gap-1 text-xs transition animate-fade-in ${
+                isViolation 
+                    ? "bg-red-950/30 border-red-500/40 text-red-200" 
+                    : "bg-emerald-950/30 border-emerald-500/40 text-emerald-200"
+            }`;
+
+            logEl.innerHTML = `
+                <div class="flex items-center justify-between font-bold">
+                    <span class="flex items-center gap-1.5 ${isViolation ? 'text-red-400' : 'text-emerald-400'}">
+                        <i class="fa-solid ${isViolation ? 'fa-triangle-exclamation' : 'fa-circle-check'}"></i>
+                        ${isViolation ? 'ルール違反 (Violation)' : 'トリガー達成 (Trigger)'}
+                    </span>
+                    <span class="text-[10px] text-slate-400 font-mono">${timeStr}</span>
+                </div>
+                <p class="text-slate-300 mt-0.5">${item.reason || '判定基準に合致しました'}</p>
+            `;
+
+            decisionLogList.prepend(logEl);
+
+            // Limit logs to max 30 items
+            if (decisionLogList.children.length > 30) {
+                decisionLogList.removeChild(decisionLogList.lastChild);
+            }
+        }
+
+        clearLogsBtn.addEventListener("click", () => {
+            decisionLogList.innerHTML = "";
+            emptyLogMsg.classList.remove("hidden");
+            decisionLogList.appendChild(emptyLogMsg);
+        });
+
+        // Initialize API Key UI on Load
+        updateApiKeyUI();
+    </script>
+</body>
+</html>
